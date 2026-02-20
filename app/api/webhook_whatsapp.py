@@ -24,16 +24,64 @@ async def whatsapp_webhook(request: Request):
         logger.warning("Invalid Twilio signature")
         return Response(status_code=status.HTTP_403_FORBIDDEN)
 
-    # 2️⃣ Now safely extract fields
+    # 2️⃣ Extract fields
     from_number = form_dict.get("From")
-#   to_number = form_dict.get("To")
     body = form_dict.get("Body")
 
     logger.info(f"Message from {from_number}: {body}")
 
-    # 3️⃣ Create reply
+    # 3️⃣ Normalize user message
+    user_message = (body or "").strip().lower()
+
+    # 4️⃣ Create Twilio response
     response = MessagingResponse()
-    response.message("Hello! This is your AI assistant. How can I help you today?")
+
+    # Main Menu Trigger
+    if user_message in ["hi", "hello", "menu", "start"]:
+        response.message(
+            "Hi 👋 Welcome to ABC Services.\n\n"
+            "1️⃣ Book appointment\n"
+            "2️⃣ Pricing info\n"
+            "3️⃣ Talk to human\n"
+            "4️⃣ Location\n\n"
+            "Reply with a number."
+        )
+
+    elif user_message == "1":
+        response.message(
+            "📅 Great! Please share your preferred date and time.\n\n"
+            "Example: 25 Feb at 4 PM"
+        )
+
+    elif user_message == "2":
+        response.message(
+            "💰 Our pricing starts from ₹999 depending on the service.\n"
+            "Would you like to book an appointment?"
+        )
+
+    elif user_message == "3":
+        response.message(
+            "👨‍💼 A team member will contact you shortly.\n"
+            "Please share your name."
+        )
+
+    elif user_message == "4":
+        response.message(
+            "📍 We are located at:\n"
+            "ABC Services\n"
+            "Banjara Hills, Hyderabad\n\n"
+            "Open: 10 AM – 7 PM"
+        )
+
+    else:
+        response.message(
+            "Sorry, I didn’t understand that.\n\n"
+            "Please reply with:\n"
+            "1️⃣ Book appointment\n"
+            "2️⃣ Pricing info\n"
+            "3️⃣ Talk to human\n"
+            "4️⃣ Location"
+        )
 
     return Response(
         content=str(response),
