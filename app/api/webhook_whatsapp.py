@@ -12,16 +12,22 @@ logger = logging.getLogger(settings.APP_NAME)
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# 🧠 In-memory session store (POC)
+# =========================
+# 🧠 SESSION STORE (POC)
+# =========================
 sessions = {}
 
-# 🔐 Twilio validation
+# =========================
+# 🔐 SECURITY
+# =========================
 def validate_twilio_request(request: Request, body: dict) -> bool:
     validator = RequestValidator(os.getenv("TWILIO_AUTH_TOKEN"))
     signature = request.headers.get("X-Twilio-Signature", "")
     return validator.validate(str(request.url), body, signature)
 
-# 👤 Name extraction
+# =========================
+# 👤 NAME EXTRACTION
+# =========================
 def extract_name(message):
     patterns = ["i am", "i'm", "my name is"]
     for p in patterns:
@@ -29,43 +35,139 @@ def extract_name(message):
             return message.lower().split(p)[-1].strip().title()
     return None
 
-# 📲 WhatsApp escalation link
-def generate_whatsapp_link(phone, session):
-    summary = f"""
-Customer Name: {session.get('name', 'Not provided')}
-Requirement: {session.get('intent', 'General inquiry')}
-"""
-    return f"https://wa.me/{phone}?text={urllib.parse.quote(summary)}"
+# =========================
+# 🎯 INTENT DETECTION
+# =========================
+def detect_intent(message):
+    msg = message.lower()
 
-# 🤖 LLM
+    if "wedding" in msg:
+        return "Wedding outfit"
+    elif "office" in msg:
+        return "Office formal wear"
+    elif "suit" in msg:
+        return "Suit requirement"
+    elif "tuxedo" in msg:
+        return "Tuxedo"
+    elif "alteration" in msg:
+        return "Alteration"
+    elif "fabric" in msg:
+        return "Fabric inquiry"
+
+    return "General inquiry"
+
+# =========================
+# 🧾 SUMMARY GENERATION
+# =========================
+def generate_summary(session):
+    history = session.get("history", [])[-5:]
+
+    summary = f"""
+🧵 BV Textiles Lead
+
+👤 Name: {session.get("name", "Not provided")}
+🎯 Requirement: {session.get("intent", "General inquiry")}
+
+💬 Recent Conversation:
+"""
+
+    for msg in history:
+        summary += f"- {msg}\n"
+
+    summary += "\nPlease assist the customer further."
+
+    return summary
+
+# =========================
+# 📲 WHATSAPP ESCALATION LINK
+# =========================
+def generate_whatsapp_link(phone, session):
+    summary = generate_summary(session)
+    encoded = urllib.parse.quote(summary)
+    return f"https://wa.me/{phone}?text={encoded}"
+
+# =========================
+# 🤖 LLM SYSTEM PROMPT (MARKDOWN)
+# =========================
+SYSTEM_PROMPT = """
+# Role
+You are a professional WhatsApp assistant for **BV Textiles & Stitchers**, Hyderabad.
+
+# Business Context
+- Premium men's formal wear and custom tailoring
+- Specializes in suits, tuxedos, blazers, formal shirts
+- Uses brands like Raymond and Park Avenue
+- Customers visit store for measurement and fitting
+
+# Objectives
+- Convert user into:
+  1. Store visit
+  2. WhatsApp lead
+- Assist with outfit selection
+- Provide a premium experience
+
+# Rules (STRICT)
+- DO NOT ask user's name if already known
+- DO NOT repeat greetings
+- DO NOT start every message with the user's name
+- Use name naturally and sparingly
+- DO NOT provide exact pricing
+- Encourage store visit for measurements
+- Suggest outfits based on occasion
+- Ask for size OR suggest in-store measurement
+
+# Inventory Handling
+If asked about stock:
+Say:
+"I’m currently in queue for live inventory access, but I’ve noted your preference."
+
+# Conversation Style
+- Natural, human, professional
+- Concise (no long paragraphs)
+- Helpful, not robotic
+
+# Fallback Behavior
+- If unsure → guide user to visit store or connect with team
+"""
+
+# =========================
+# 🤖 LLM CALL
+# =========================
 def generate_ai_reply(message, session):
     try:
+        context = f"""
+User Name: {session.get("name", "unknown")}
+Intent: {session.get("intent")}
+Recent Messages: {session.get("history")[-5:]}
+User Message: {message}
+"""
+
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are an assistant for BV Textiles & Stitchers.\n"
-                        "- Capture user's name and use it naturally\n"
-                        "- Do NOT give exact pricing\n"
-                        "- Suggest store visit\n"
-                        "- Ask for size or fitting preference\n"
-                        "- Recommend outfits\n"
-                        "- If inventory asked: say you are still in queue for inventory access\n"
-                        "- Be human and conversational\n"
-                    )
-                },
-                {"role": "user", "content": message}
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": context}
             ],
             max_tokens=120
         )
+
         return response.choices[0].message.content.strip()
+
     except Exception as e:
         logger.error(f"LLM Error: {e}")
-        return "I’m here to help! Could you please tell me a bit more about what you're looking for?"
+        return "I’m here to help! Could you tell me a bit more about your requirement?"
 
-# 📲 MAIN ENDPOINT
+# =========================
+# 🧠 NAME USAGE CONTROL
+# =========================
+def get_name_prefix(session):
+    if session["name"] and len(session["history"]) > 2:
+        return f"{session['name']}, "
+    return ""
+
+# =========================
+# 📲 MAIN WEBHOOK
+# =========================
 @router.post("/webhook/whatsapp")
 async def whatsapp_webhook(request: Request):
     form = await request.form()
@@ -77,7 +179,7 @@ async def whatsapp_webhook(request: Request):
     from_number = data.get("From")
     body = data.get("Body", "")
 
-    # 🧠 INIT SESSION
+    # SESSION INIT
     if from_number not in sessions:
         sessions[from_number] = {
             "name": None,
@@ -91,57 +193,58 @@ async def whatsapp_webhook(request: Request):
     user_message = body.strip().lower()
     response = MessagingResponse()
 
-    # 👤 Name detection
+    # NAME DETECTION
     name = extract_name(body)
-    if name:
+    if name and not session["name"]:
         session["name"] = name
 
-    name_prefix = f"{session['name']}, " if session["name"] else ""
+    # INTENT UPDATE
+    session["intent"] = detect_intent(body)
 
-    # 📍 Location intent
-    if any(word in user_message for word in ["location", "where", "address"]):
+    name_prefix = get_name_prefix(session)
+
+    # =========================
+    # 📋 MENU
+    # =========================
+    if user_message in ["hi", "hello", "hey", "start"]:
         response.message(
-            f"{name_prefix}📍 We are located at Basheer Bagh, Hyderabad.\n\n"
-            "Here’s our Google Maps location:\n"
+            "Hi 👋 Welcome to BV Textiles & Stitchers.\n\n"
+            "How can I assist you today?\n\n"
+            "1️⃣ Book Appointment / Visit Store\n"
+            "2️⃣ Explore Services & Products\n"
+            "3️⃣ Outfit Suggestions\n"
+            "4️⃣ Store Location & Timings\n"
+            "5️⃣ Talk to a Specialist\n\n"
+            "Reply with a number or type your requirement."
+        )
+        return Response(content=str(response), media_type="application/xml")
+
+    # =========================
+    # 📍 LOCATION
+    # =========================
+    elif any(word in user_message for word in ["location", "where", "address"]):
+        response.message(
+            f"{name_prefix}📍 Basheer Bagh, Hyderabad\n\n"
             "https://www.google.com/maps/search/?api=1&query=BV+Textiles+Basheer+Bagh+Hyderabad\n\n"
-            "You can visit us between 11 AM and 9:30 PM."
+            "🕒 11 AM – 9:30 PM"
         )
 
-    # 📲 Human help
-    elif any(word in user_message for word in ["human", "call", "contact", "talk"]):
-        link = generate_whatsapp_link("9966283131", session)  # 🔁 replace with real number
+    # =========================
+    # 📲 HUMAN ESCALATION
+    # =========================
+    elif any(word in user_message for word in ["human", "talk", "call", "contact"]):
+        link = generate_whatsapp_link("919966283131", session)
 
         response.message(
-            f"{name_prefix}I’ll connect you with our team for personalized assistance.\n\n"
+            f"{name_prefix}Got it 👍\n\n"
+            "I’ve shared your requirement with our team so you don’t have to repeat anything.\n\n"
+            "Continue here:\n\n"
             f"👉 {link}"
         )
 
-    # 👔 Appointment / fitting flow
-    elif "appointment" in user_message or "visit" in user_message:
-        response.message(
-            f"{name_prefix}We’d love to help you get the perfect fit!\n\n"
-            "Would you like to visit for measurements, or do you already know your size?\n\n"
-            "We recommend visiting for best results."
-        )
-
-    # 🧵 Inventory placeholder
-    elif "fabric" in user_message or "collection" in user_message:
-        response.message(
-            f"{name_prefix}We have a wide range of premium fabrics including Raymond and Park Avenue.\n\n"
-            "I’m currently in queue for live inventory access.\n"
-            "But I’ve noted your preference.\n\n"
-            "Would you like help choosing a style?"
-        )
-
-    # 💰 Pricing (controlled)
-    elif "price" in user_message or "cost" in user_message:
-        response.message(
-            f"{name_prefix}Pricing depends on fabric and customization.\n\n"
-            "We recommend visiting our store or connecting with our team for accurate details.\n\n"
-            "Would you like me to connect you?"
-        )
-
-    # 🧠 LLM fallback
+    # =========================
+    # 🤖 AI FALLBACK
+    # =========================
     else:
         ai_reply = generate_ai_reply(body, session)
         response.message(name_prefix + ai_reply)
