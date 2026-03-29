@@ -87,34 +87,31 @@ def generate_whatsapp_link(phone, session):
     return f"https://wa.me/{phone}?text={encoded}"
 
 # =========================
-# 🤖 LLM SYSTEM PROMPT (MARKDOWN)
+# 🤖 SYSTEM PROMPT (CLEAN + GUARDED)
 # =========================
 SYSTEM_PROMPT = """
 # Role
-You are a professional WhatsApp assistant for **BV Textiles & Stitchers**, Hyderabad.
+You are a professional WhatsApp assistant for BV Textiles & Stitchers (Hyderabad).
+
+# Objective
+Convert users into:
+- Store visits
+- Qualified leads
 
 # Business Context
-- Premium men's formal wear and custom tailoring
-- Specializes in suits, tuxedos, blazers, formal shirts
-- Uses brands like Raymond and Park Avenue
-- Customers visit store for measurement and fitting
-
-# Objectives
-- Convert user into:
-  1. Store visit
-  2. WhatsApp lead
-- Assist with outfit selection
-- Provide a premium experience
+- Premium men's formal wear
+- Custom tailoring (suits, tuxedos, blazers)
+- Raymond & Park Avenue fabrics
+- In-store measurement preferred
 
 # Rules (STRICT)
-- DO NOT ask user's name if already known
-- DO NOT repeat greetings
-- DO NOT start every message with the user's name
-- Use name naturally and sparingly
-- DO NOT provide exact pricing
-- Encourage store visit for measurements
-- Suggest outfits based on occasion
-- Ask for size OR suggest in-store measurement
+- Do NOT ask name if already known
+- Do NOT repeat greetings
+- Do NOT overuse the name
+- Do NOT give exact pricing
+- Encourage store visit
+- Ask about occasion, style, or size
+- Keep replies concise
 
 # Inventory Handling
 If asked about stock:
@@ -122,12 +119,14 @@ Say:
 "I’m currently in queue for live inventory access, but I’ve noted your preference."
 
 # Conversation Style
-- Natural, human, professional
-- Concise (no long paragraphs)
-- Helpful, not robotic
+- Natural
+- Helpful
+- Slightly premium tone
+- Ask 1–2 smart follow-up questions
 
-# Fallback Behavior
-- If unsure → guide user to visit store or connect with team
+# Behavior
+- Guide conversation (not passive)
+- Suggest next step
 """
 
 # =========================
@@ -136,10 +135,16 @@ Say:
 def generate_ai_reply(message, session):
     try:
         context = f"""
-User Name: {session.get("name", "unknown")}
-Intent: {session.get("intent")}
-Recent Messages: {session.get("history")[-5:]}
-User Message: {message}
+Customer Name: {session.get("name", "unknown")}
+Detected Intent: {session.get("intent")}
+Conversation So Far: {session.get("history")[-5:]}
+
+Latest User Message: {message}
+
+Your task:
+- Understand requirement
+- Suggest outfit or next step
+- Ask relevant follow-up (size / visit / occasion)
 """
 
         response = client.chat.completions.create(
@@ -179,7 +184,7 @@ async def whatsapp_webhook(request: Request):
     from_number = data.get("From")
     body = data.get("Body", "")
 
-    # SESSION INIT
+    # INIT SESSION
     if from_number not in sessions:
         sessions[from_number] = {
             "name": None,
@@ -198,24 +203,26 @@ async def whatsapp_webhook(request: Request):
     if name and not session["name"]:
         session["name"] = name
 
-    # INTENT UPDATE
-    session["intent"] = detect_intent(body)
+    # INTENT FIX (NO OVERWRITE BUG)
+    detected_intent = detect_intent(body)
+    if session["intent"] is None or session["intent"] == "General inquiry":
+        session["intent"] = detected_intent
 
     name_prefix = get_name_prefix(session)
 
     # =========================
-    # 📋 MENU
+    # 👋 GREETING (NO MENU)
     # =========================
     if user_message in ["hi", "hello", "hey", "start"]:
         response.message(
             "Hi 👋 Welcome to BV Textiles & Stitchers.\n\n"
-            "How can I assist you today?\n\n"
-            "1️⃣ Book Appointment / Visit Store\n"
-            "2️⃣ Explore Services & Products\n"
-            "3️⃣ Outfit Suggestions\n"
-            "4️⃣ Store Location & Timings\n"
-            "5️⃣ Talk to a Specialist\n\n"
-            "Reply with a number or type your requirement."
+            "I can help you with:\n"
+            "• Outfit suggestions (weddings, office, occasions)\n"
+            "• Custom tailoring & fittings\n"
+            "• Fabric selection guidance\n"
+            "• Store location & visit planning\n"
+            "• Connecting you with our team\n\n"
+            "Tell me what you're looking for 🙂"
         )
         return Response(content=str(response), media_type="application/xml")
 
@@ -230,6 +237,16 @@ async def whatsapp_webhook(request: Request):
         )
 
     # =========================
+    # 👔 GUIDED SELLING
+    # =========================
+    elif "wedding" in user_message or "suit" in user_message:
+        response.message(
+            f"{name_prefix}That sounds great — we can help you with that.\n\n"
+            "Are you looking for a classic formal look or something more modern?\n\n"
+            "Also, would you prefer visiting for measurements or do you already know your size?"
+        )
+
+    # =========================
     # 📲 HUMAN ESCALATION
     # =========================
     elif any(word in user_message for word in ["human", "talk", "call", "contact"]):
@@ -238,7 +255,7 @@ async def whatsapp_webhook(request: Request):
         response.message(
             f"{name_prefix}Got it 👍\n\n"
             "I’ve shared your requirement with our team so you don’t have to repeat anything.\n\n"
-            "Continue here:\n\n"
+            "They’ll take over from here:\n\n"
             f"👉 {link}"
         )
 
